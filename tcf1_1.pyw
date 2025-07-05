@@ -11,9 +11,12 @@ import io
 import vlc
 import yt_dlp
 
-CONFIG_FILE = 'twitch_presets.json'
-RESULTS_FILE = 'clip_results.txt'
-PRESET_FILE = CONFIG_FILE  # falls du nur eine Datei für Presets nutzt
+# Get the directory of the currently running script
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
+CONFIG_FILE = os.path.join(script_dir, 'twitch_presets.json')
+RESULTS_FILE = os.path.join(script_dir, 'clip_results.txt')
+PRESET_FILE = os.path.join(script_dir, 'twitch_presets.json') # Explicitly use absolute path
 TOKEN_URL = 'https://id.twitch.tv/oauth2/token'
 CLIPS_URL = 'https://api.twitch.tv/helix/clips'
 CLIENT_ID = 'bigudl2pguod3yrnstzrcbsbvffqlu'
@@ -436,13 +439,16 @@ class App:
         threading.Thread(target=self.download_selected, daemon=True).start()
 
     def download_selected(self):
-        folder = self.entries["Download-Ordner"].get() or 'clips_downloaded'
+        folder_path = self.entries["Download-Ordner"].get() or 'clips_downloaded'
+        if not os.path.isabs(folder_path):
+            folder_path = os.path.join(script_dir, folder_path)
+
         selected = [url for var, url in self.clip_vars if var.get()]
         if not selected:
             self.log("❗ Keine Clips ausgewählt.")
             return
         for url in selected:
-            download_clip(url, folder, self.log)
+            download_clip(url, folder_path, self.log)
 
 if __name__ == '__main__':
     root = tk.Tk()
