@@ -1,5 +1,17 @@
-import os
 import sys
+import os # Keep os import early if script_dir relies on it right away, though ctypes should be first
+try:
+    import ctypes
+    # Attempt to set DPI awareness (Windows specific)
+    # This needs to be done before Tkinter's main window is initialized
+    if sys.platform == "win32":
+        ctypes.windll.shcore.SetProcessDpiAwareness(1) # Process_Per_Monitor_DPI_Aware
+        # Alternatively, for older systems or different behavior:
+        # ctypes.windll.user32.SetProcessDPIAware()
+        print("Attempted to set DPI awareness for Windows.")
+except Exception as e:
+    print(f"Info: Could not set DPI awareness (may not be on Windows or ctypes not found/error): {e}")
+
 import json
 import requests
 from datetime import datetime, timedelta, timezone
@@ -10,6 +22,8 @@ from PIL import Image, ImageTk
 import io
 import vlc
 import yt_dlp
+from tkinter import font # Import font module
+
 
 # Get the directory of the currently running script
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -181,28 +195,36 @@ def download_clip(clip_url, folder, log_func=None):
         log_func(f"Download-Fehler: {e}" if log_func else f"Download error: {e}")
 
 class VLCPlayer:
-    def __init__(self, parent):
+    def __init__(self): # No longer needs parent for UI creation here
         self.instance = vlc.Instance()
         self.player = self.instance.media_player_new()
-        self.parent = parent
-        self.setup_ui()
+        self.videopanel = None # Will be created in setup_ui_in_frame
+        self.control = None    # Will be created in setup_ui_in_frame
 
-    def setup_ui(self):
-        self.videopanel = tk.Frame(self.parent, bg='black', width=640, height=360)
-        self.videopanel.grid(row=0, column=2, sticky='nsew', padx=10, pady=10)
-        self.parent.grid_columnconfigure(2, weight=1)
-        self.parent.grid_rowconfigure(0, weight=1)
+    def setup_ui_in_frame(self, parent_frame):
+        # parent_frame is the dedicated container for VLC UI, child of PanedWindow
 
-        self.control = ttk.Frame(self.parent)
-        self.control.grid(row=1, column=2, sticky='ew', padx=10)
+        # Video panel is a child of parent_frame
+        self.videopanel = tk.Frame(parent_frame, bg='black', width=640, height=360)
+        self.videopanel.grid(row=0, column=0, sticky='nsew')
+
+        # Control panel is also a child of parent_frame
+        self.control = ttk.Frame(parent_frame)
+        self.control.grid(row=1, column=0, sticky='ew', pady=5)
+
+        # Configure parent_frame's grid (this frame is the pane in PanedWindow)
+        parent_frame.grid_rowconfigure(0, weight=1) # Video panel row should expand
+        parent_frame.grid_columnconfigure(0, weight=1) # Video panel col should expand
+        # Row 1 for controls has weight 0 by default, which is fine.
 
         ttk.Button(self.control, text="▶ Play", command=self.player.play).pack(side='left', padx=5)
         ttk.Button(self.control, text="⏸ Pause", command=self.player.pause).pack(side='left', padx=5)
         ttk.Button(self.control, text="⏹ Stop", command=self.player.stop).pack(side='left', padx=5)
 
-        self.parent.update()  # Warten, bis Videopanel da ist
-
     def set_media(self, url):
+        if not self.videopanel:
+            print("VLC videopanel not setup yet!")
+            return
         media = self.instance.media_new(url)
         self.player.set_media(media)
         win_id = self.videopanel.winfo_id()
@@ -226,7 +248,27 @@ class App:
         self.thumb_imgs = []
         self.access_token = None
         self.current_preset = None
-        self.vlc = VLCPlayer(self.root)
+        self.vlc = VLCPlayer() # Initialize without parent for UI
+
+        # Attempt to set a default font
+        try:
+            default_font = font.nametofont("TkDefaultFont")
+            # Using common fonts that tend to render better with scaling
+            # Defaulting to Segoe UI for Windows, DejaVu Sans for others, then system default
+            # Using point size (e.g., 10) can sometimes help with scaling
+            families_to_try = ("Segoe UI", "DejaVu Sans", default_font.actual()["family"])
+            chosen_family = default_font.actual()["family"] # Start with current default
+            for family in families_to_try:
+                if family in font.families():
+                    chosen_family = family
+                    break
+
+            default_font.configure(family=chosen_family, size=10) # size in points
+            self.root.option_add("*Font", default_font)
+            print(f"Attempted to set default font to: {chosen_family}, 10pt")
+        except Exception as e:
+            print(f"Could not set default font: {e}")
+
         self.build_gui()
         self.obtain_access_token()
 
@@ -254,53 +296,108 @@ class App:
             self.log(f"Fehler beim Speichern des Presets: {e}")
 
     def build_gui(self):
-        # Linke Seite: Einstellungen & Buttons
-        left = ttk.Frame(self.root, padding=10)
-        left.grid(row=0, column=0, sticky='ns')
+        # --- Dark Theme Styling ---
+        dark_bg = "#2E2E2E"
+        light_fg = "#D3D3D3" # Light Grey
+        widget_bg = "#3C3C3C"
+        entry_select_bg = "#555555" # Selection color for Entry/Text
 
-        ttk.Label(left, text="Preset:").pack(anchor='w')
+        self.root.configure(bg=dark_bg)
+
+        s = ttk.Style()
+        s.theme_use('clam') # 'clam', 'alt', 'default', 'classic' are common ttk themes. 'clam' is often good for styling.
+
+        # General widget styling
+        s.configure('.', background=dark_bg, foreground=light_fg)
+        s.configure('TFrame', background=dark_bg)
+        s.configure('TLabel', background=dark_bg, foreground=light_fg)
+        s.configure('TButton', background=widget_bg, foreground=light_fg) # May need to map states
+        s.map('TButton', background=[('active', '#555555')])
+        s.configure('TEntry', fieldbackground=widget_bg, foreground=light_fg, insertcolor=light_fg,
+                    selectbackground=entry_select_bg, selectforeground=light_fg)
+        s.configure('TCombobox', fieldbackground=widget_bg, foreground=light_fg, selectbackground=widget_bg,
+                    selectforeground=light_fg, background=widget_bg)
+        # For Combobox dropdown list (might need more specific handling if this doesn't cover it)
+        self.root.option_add('*TCombobox*Listbox.background', widget_bg)
+        self.root.option_add('*TCombobox*Listbox.foreground', light_fg)
+        self.root.option_add('*TCombobox*Listbox.selectBackground', entry_select_bg)
+        self.root.option_add('*TCombobox*Listbox.selectForeground', light_fg)
+
+        s.configure('Vertical.TScrollbar', background=widget_bg, troughcolor=dark_bg, bordercolor=dark_bg, arrowcolor=light_fg)
+        s.map('Vertical.TScrollbar', background=[('active', '#555555')])
+        s.configure('Horizontal.TScrollbar', background=widget_bg, troughcolor=dark_bg, bordercolor=dark_bg, arrowcolor=light_fg)
+        s.map('Horizontal.TScrollbar', background=[('active', '#555555')])
+
+        s.configure('TCheckbutton', background=dark_bg, foreground=light_fg, indicatorcolor=widget_bg)
+        s.map('TCheckbutton',
+              background=[('active', dark_bg)],
+              indicatorcolor=[('selected', light_fg), ('!selected', widget_bg)])
+
+        # PanedWindow sash color (this is tricky with ttk, might need tk.PanedWindow or direct configure if supported)
+        s.configure('TPanedwindow', background=dark_bg)
+        s.configure('Sash', background=widget_bg, lightcolor=widget_bg, darkcolor=widget_bg, bordercolor=dark_bg)
+        # --- End Dark Theme Styling ---
+
+        # Master PanedWindow (horizontal: settings | clips_and_vlc_area)
+        master_paned_window = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL) # sashrelief=tk.RAISED, sashwidth=6
+        master_paned_window.grid(row=0, column=0, sticky='nsew')
+
+        # Linke Seite: Einstellungen & Buttons (Pane 1 of master_paned_window)
+        left_settings_pane = ttk.Frame(master_paned_window, padding=10)
+        # left_settings_pane.grid(row=0, column=0, sticky='ns') # PanedWindow manages this
+        master_paned_window.add(left_settings_pane, weight=0) # Settings pane, less resize weight initially
+
+        ttk.Label(left_settings_pane, text="Preset:").pack(anchor='w')
         self.preset_var = tk.StringVar()
-        self.preset_combo = ttk.Combobox(left, textvariable=self.preset_var, values=list(self.presets.keys()))
+        self.preset_combo = ttk.Combobox(left_settings_pane, textvariable=self.preset_var, values=list(self.presets.keys()))
         self.preset_combo.pack(fill='x')
         self.preset_combo.bind("<<ComboboxSelected>>", self.on_preset_selected)
 
-        self.save_btn = ttk.Button(left, text="Neues Preset speichern", command=self.save_preset)
+        self.save_btn = ttk.Button(left_settings_pane, text="Neues Preset speichern", command=self.save_preset)
         self.save_btn.pack(fill='x', pady=5)
 
         self.entries = {}
         labels = ["Zeitraum (Tage)", "Max Clips", "Kategorien (Komma)", "Kanäle (Komma)", "Sprachen (Komma)", "Download-Ordner"]
         for lbl in labels:
-            ttk.Label(left, text=lbl + ":").pack(anchor='w')
-            e = ttk.Entry(left)
+            ttk.Label(left_settings_pane, text=lbl + ":").pack(anchor='w')
+            e = ttk.Entry(left_settings_pane)
             e.pack(fill='x')
             self.entries[lbl] = e
 
-        ttk.Button(left, text="Ordner wählen", command=self.choose_folder).pack(fill='x', pady=5)
-        ttk.Button(left, text="Clips suchen", command=self.fetch_thread).pack(fill='x', pady=10)
-        ttk.Button(left, text="Herunterladen", command=self.download_thread).pack(fill='x')
+        ttk.Button(left_settings_pane, text="Ordner wählen", command=self.choose_folder).pack(fill='x', pady=5)
+        ttk.Button(left_settings_pane, text="Clips suchen", command=self.fetch_thread).pack(fill='x', pady=10)
+        ttk.Button(left_settings_pane, text="Herunterladen", command=self.download_thread).pack(fill='x')
 
-        # Rechte Seite: Clip-Liste mit Scrollbar
-        right = ttk.Frame(self.root, padding=10)
-        right.grid(row=0, column=1, sticky='nsew')
+        # Right Main Area PanedWindow (Clips | VLC) (Pane 2 of master_paned_window)
+        clips_vlc_paned_window = ttk.PanedWindow(master_paned_window, orient=tk.HORIZONTAL)
+        master_paned_window.add(clips_vlc_paned_window, weight=1) # This pane gets more resize weight
 
-        self.canvas = tk.Canvas(right)
-        self.scrollbar = ttk.Scrollbar(right, orient='vertical', command=self.canvas.yview)
+        # Clip List Area (Pane 1 of clips_vlc_paned_window)
+        self.clip_list_display_frame = ttk.Frame(clips_vlc_paned_window, padding=5, width=300, height=400) # Removed style='DebugClip.TFrame'
+        self.canvas = tk.Canvas(self.clip_list_display_frame, bg=dark_bg, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(self.clip_list_display_frame, orient='vertical', command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
-
         self.clip_frame = ttk.Frame(self.canvas)
         self.clip_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
-
         self.canvas.create_window((0, 0), window=self.clip_frame, anchor='nw')
-
         self.canvas.pack(side='left', fill='both', expand=True)
         self.scrollbar.pack(side='right', fill='y')
+        clips_vlc_paned_window.add(self.clip_list_display_frame, weight=1)
 
-        # Log-Textfeld unten
-        self.log_text = tk.Text(self.root, height=8)
-        self.log_text.grid(row=1, column=0, columnspan=2, sticky='ew', padx=10, pady=5)
+        # VLC Player Area (Pane 2 of clips_vlc_paned_window)
+        vlc_pane_container = ttk.Frame(clips_vlc_paned_window, width=640, height=400) # Removed style='DebugVLC.TFrame'
+        # It will inherit the TFrame style which is already dark_bg
+        clips_vlc_paned_window.add(vlc_pane_container, weight=1)
+        self.vlc.setup_ui_in_frame(vlc_pane_container)
 
-        self.root.columnconfigure(1, weight=1)
-        self.root.rowconfigure(0, weight=1)
+        # Log-Textfeld unten - now in row 1, under the master_paned_window
+        self.log_text = tk.Text(self.root, height=8, bg=widget_bg, fg=light_fg, relief=tk.FLAT, selectbackground=entry_select_bg)
+        self.log_text.grid(row=1, column=0, sticky='ew', padx=10, pady=5) # Spans the single column of root
+
+        # Configure root window grid (now 1 main column, 2 rows)
+        self.root.columnconfigure(0, weight=1) # Master PanedWindow takes all width
+        self.root.rowconfigure(0, weight=1)    # Master PanedWindow takes most height
+        self.root.rowconfigure(1, weight=0)    # Log row (fixed height)
 
     def log(self, msg):
         self.log_text.insert('end', msg + '\n')
@@ -415,7 +512,28 @@ class App:
                 pass
 
             title = f"{clip['title']} ({clip['broadcaster_name']}) [{clip['view_count']} Aufrufe]"
-            ttk.Label(frame, text=title, wraplength=300).pack(side='left', padx=5)
+            created_at_str = clip.get('created_at', '')
+            formatted_date = ''
+            if created_at_str and isinstance(created_at_str, str): # Check if it's a non-empty string
+                try:
+                    # Replace 'Z' with '+00:00' if present, for broader Python version compatibility with fromisoformat
+                    if created_at_str.endswith('Z'):
+                        created_at_str_modified = created_at_str[:-1] + '+00:00'
+                    else:
+                        created_at_str_modified = created_at_str
+                    dt_obj = datetime.fromisoformat(created_at_str_modified)
+                    formatted_date = dt_obj.strftime('%Y-%m-%d')
+                except ValueError:
+                    formatted_date = 'Unknown Date' # Fallback if parsing fails
+                except Exception: # Catch any other unexpected error during date processing
+                    formatted_date = 'Error Date'
+            elif not created_at_str:
+                formatted_date = "No Date"
+            else: # Not a string or empty
+                formatted_date = "Invalid Date"
+
+            title_with_date = f"{clip['title']} ({clip['broadcaster_name']}) [{clip['view_count']} Aufrufe] - {formatted_date}"
+            ttk.Label(frame, text=title_with_date, wraplength=350).pack(side='left', padx=5)
 
             ttk.Button(frame, text="Vorschau", command=lambda u=clip['url']: self.play_clip(u)).pack(side='right')
 
