@@ -23,6 +23,7 @@ import io
 import vlc
 import yt_dlp
 from tkinter import font # Import font module
+from concurrent.futures import ThreadPoolExecutor
 
 
 # Get the directory of the currently running script
@@ -116,58 +117,79 @@ def fetch_clips_debug(preset, access_token):
     channels = preset.get('channels') or []
     languages = preset.get('languages') or []
 
-    results = []
-
-    print(f"[DEBUG] Token: {access_token}")
+    print(f"[DEBUG] Token: {access_token[:5]}...")
     print(f"[DEBUG] Base Params: {base_params}")
     print(f"[DEBUG] Categories: {categories}")
     print(f"[DEBUG] Channels: {channels}")
     print(f"[DEBUG] Languages: {languages}")
 
+    def _fetch_page(params):
+        """Fetches a single page of clips and filters by language."""
+        try:
+            response = requests.get(CLIPS_URL, headers=headers, params=params, timeout=10)
+            # print(f"[DEBUG] Request URL: {response.request.url}") # Optional: very verbose
+            if response.ok:
+                clips = response.json().get('data', [])
+                if not languages:
+                    return clips
+                return [clip for clip in clips if clip.get('language') in languages]
+            else:
+                print(f"[DEBUG] API Error for {params}: {response.status_code} - {response.text}")
+                response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching clips with params {params}: {e}")
+        return []
+
+    search_params_list = []
     if not categories and not channels:
         print("[DEBUG] Keine Kategorien oder Kanäle ausgewählt: Alle Top-Spiele durchsuchen.")
         top_games = get_top_games(headers)
         print(f"[DEBUG] Gefundene Top-Spiele: {[g['name'] for g in top_games]}")
         for game in top_games:
-            game_id = game['id']
             params = base_params.copy()
-            params['game_id'] = game_id
-            print(f"[DEBUG] Request URL: {CLIPS_URL}")
-            print(f"[DEBUG] Request Params: {params}")
-            print(f"[DEBUG] Request Headers: {headers}")
-            response = requests.get(CLIPS_URL, headers=headers, params=params)
-            print(f"[DEBUG] Response Status: {response.status_code}")
-            print(f"[DEBUG] Response Text: {response.text}")
-            if response.ok:
-                for clip in response.json().get('data', []):
-                    if not languages or clip['language'] in languages:
-                        results.append(clip)
-        return sorted(results, key=lambda c: c['view_count'], reverse=True)
+            params['game_id'] = game['id']
+            search_params_list.append(params)
+    else:
+        game_ids = {cat: get_game_id(cat, headers) for cat in categories}
+        user_ids = {chan: get_user_id(chan, headers) for chan in channels}
 
-    for category in categories or [None]:
-        game_id = get_game_id(category, headers) if category else None
+        category_items = categories or [None]
+        channel_items = channels or [None]
 
-        for channel in channels or [None]:
-            broadcaster_id = get_user_id(channel, headers) if channel else None
+        for category_name in category_items:
+            game_id = game_ids.get(category_name) if category_name else None
+            if category_name and not game_id:
+                print(f"Warnung: Spiel-ID für '{category_name}' nicht gefunden. Überspringe.")
+                continue
 
-            params = base_params.copy()
-            if game_id:
-                params['game_id'] = game_id
-            if broadcaster_id:
-                params['broadcaster_id'] = broadcaster_id
+            for channel_name in channel_items:
+                broadcaster_id = user_ids.get(channel_name) if channel_name else None
+                if channel_name and not broadcaster_id:
+                    print(f"Warnung: Benutzer-ID für '{channel_name}' nicht gefunden. Überspringe.")
+                    continue
 
-            print(f"[DEBUG] Request URL: {CLIPS_URL}")
-            print(f"[DEBUG] Request Params: {params}")
-            print(f"[DEBUG] Request Headers: {headers}")
-            response = requests.get(CLIPS_URL, headers=headers, params=params)
-            print(f"[DEBUG] Response Status: {response.status_code}")
-            print(f"[DEBUG] Response Text: {response.text}")
-            if response.ok:
-                for clip in response.json().get('data', []):
-                    if not languages or clip['language'] in languages:
-                        results.append(clip)
+                params = base_params.copy()
+                if game_id:
+                    params['game_id'] = game_id
+                if broadcaster_id:
+                    params['broadcaster_id'] = broadcaster_id
 
-    return sorted(results, key=lambda c: c['view_count'], reverse=True)
+                if 'game_id' in params or 'broadcaster_id' in params:
+                    search_params_list.append(params)
+
+    if not search_params_list:
+        print("[DEBUG] Keine gültigen Suchanfragen zu stellen.")
+        return []
+
+    all_clips = []
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        future_results = executor.map(_fetch_page, search_params_list)
+        for clip_list in future_results:
+            all_clips.extend(clip_list)
+
+    unique_clips = {clip['id']: clip for clip in all_clips}.values()
+
+    return sorted(list(unique_clips), key=lambda c: c['view_count'], reverse=True)
 
 def get_direct_video_url(clip_url):
     try:
@@ -493,50 +515,61 @@ class App:
         if not self.clips:
             self.log("Keine Clips gefunden.")
             return
+
+        def _download_and_create_image(clip):
+            """Downloads thumbnail, creates PhotoImage. Can be run in a thread."""
+            try:
+                url = clip['thumbnail_url'].split('-preview-')[0] + '.jpg'
+                response = requests.get(url, timeout=10)
+                response.raise_for_status()
+                im = Image.open(io.BytesIO(response.content)).resize((120, 68))
+                img = ImageTk.PhotoImage(im)
+                return clip['id'], img
+            except Exception as e:
+                # print(f"Could not load thumbnail for {clip.get('url')}: {e}") # Optional for debugging
+                return clip['id'], None
+
+        thumbnails = {}
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            future_to_img = executor.map(_download_and_create_image, self.clips)
+            for clip_id, img in future_to_img:
+                if img:
+                    thumbnails[clip_id] = img
+
+        self.log(f"Thumbnails geladen: {len(thumbnails)}/{len(self.clips)}")
+        self.thumb_imgs.clear()
+
         for clip in self.clips:
             var = tk.BooleanVar()
             frame = ttk.Frame(self.clip_frame, relief='raised', padding=5)
             cb = ttk.Checkbutton(frame, variable=var)
             cb.pack(side='left')
 
-            # Thumbnail laden
-            try:
-                url = clip['thumbnail_url'].split('-preview-')[0] + '.jpg'
-                im = Image.open(io.BytesIO(requests.get(url, timeout=5).content)).resize((120, 68))
-                img = ImageTk.PhotoImage(im)
+            img = thumbnails.get(clip['id'])
+            if img:
                 lbl_img = tk.Label(frame, image=img)
                 lbl_img.image = img
                 lbl_img.pack(side='left', padx=5)
-                self.thumb_imgs.append(img)  # Referenz behalten
-            except Exception:
-                pass
+                self.thumb_imgs.append(img)
 
-            title = f"{clip['title']} ({clip['broadcaster_name']}) [{clip['view_count']} Aufrufe]"
             created_at_str = clip.get('created_at', '')
             formatted_date = ''
-            if created_at_str and isinstance(created_at_str, str): # Check if it's a non-empty string
+            if created_at_str and isinstance(created_at_str, str):
                 try:
-                    # Replace 'Z' with '+00:00' if present, for broader Python version compatibility with fromisoformat
                     if created_at_str.endswith('Z'):
                         created_at_str_modified = created_at_str[:-1] + '+00:00'
                     else:
                         created_at_str_modified = created_at_str
                     dt_obj = datetime.fromisoformat(created_at_str_modified)
                     formatted_date = dt_obj.strftime('%Y-%m-%d')
-                except ValueError:
-                    formatted_date = 'Unknown Date' # Fallback if parsing fails
-                except Exception: # Catch any other unexpected error during date processing
-                    formatted_date = 'Error Date'
-            elif not created_at_str:
+                except (ValueError, TypeError):
+                    formatted_date = 'Unknown Date'
+            else:
                 formatted_date = "No Date"
-            else: # Not a string or empty
-                formatted_date = "Invalid Date"
 
             title_with_date = f"{clip['title']} ({clip['broadcaster_name']}) [{clip['view_count']} Aufrufe] - {formatted_date}"
             ttk.Label(frame, text=title_with_date, wraplength=350).pack(side='left', padx=5)
-
             ttk.Button(frame, text="Vorschau", command=lambda u=clip['url']: self.play_clip(u)).pack(side='right')
-
             frame.pack(fill='x', pady=3, padx=2)
             self.clip_vars.append((var, clip['url']))
 
@@ -561,12 +594,20 @@ class App:
         if not os.path.isabs(folder_path):
             folder_path = os.path.join(script_dir, folder_path)
 
-        selected = [url for var, url in self.clip_vars if var.get()]
-        if not selected:
+        selected_urls = [url for var, url in self.clip_vars if var.get()]
+        if not selected_urls:
             self.log("❗ Keine Clips ausgewählt.")
             return
-        for url in selected:
-            download_clip(url, folder_path, self.log)
+
+        self.log(f"Starte Download von {len(selected_urls)} Clips...")
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            # Use executor.map to download clips in parallel.
+            # The lambda function calls download_clip for each url.
+            # list() is used to ensure all tasks are executed before proceeding.
+            list(executor.map(lambda url: download_clip(url, folder_path, self.log), selected_urls))
+
+        self.log("Alle Downloads abgeschlossen oder versucht.")
 
 if __name__ == '__main__':
     root = tk.Tk()
