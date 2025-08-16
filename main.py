@@ -1,17 +1,5 @@
 import sys
-import os # Keep os import early if script_dir relies on it right away, though ctypes should be first
-try:
-    import ctypes
-    # Attempt to set DPI awareness (Windows specific)
-    # This needs to be done before Tkinter's main window is initialized
-    if sys.platform == "win32":
-        ctypes.windll.shcore.SetProcessDpiAwareness(1) # Process_Per_Monitor_DPI_Aware
-        # Alternatively, for older systems or different behavior:
-        # ctypes.windll.user32.SetProcessDPIAware()
-        print("Attempted to set DPI awareness for Windows.")
-except Exception as e:
-    print(f"Info: Could not set DPI awareness (may not be on Windows or ctypes not found/error): {e}")
-
+import os
 import json
 import requests
 from datetime import datetime, timedelta, timezone
@@ -20,8 +8,54 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, Canvas, Scrollbar
 from PIL import Image, ImageTk
 import io
-import vlc
 import yt_dlp
+from tkinter import font
+from concurrent.futures import ThreadPoolExecutor
+
+# --- Platform Specific Setup ---
+
+# 1. DPI Awareness (Windows-specific)
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        print("Attempted to set DPI awareness for Windows.")
+    except Exception as e:
+        print(f"Info: Could not set DPI awareness: {e}")
+
+# 2. VLC Dependency Check
+try:
+    import vlc
+except (ImportError, OSError) as e:
+    vlc = None
+    print(f"VLC library not found: {e}")
+    def show_vlc_error():
+        error_title = "VLC Installation Required"
+        error_message = (
+            "The VLC media player library is required for video previews but could not be found.\n\n"
+            "Please install VLC and the Python-VLC library.\n\n"
+            "On Debian/Ubuntu:\n"
+            "sudo apt-get install vlc libvlc-dev\n"
+            "pip install python-vlc\n\n"
+            "On Fedora:\n"
+            "sudo dnf install vlc vlc-devel\n"
+            "pip install python-vlc\n\n"
+            "On Arch Linux:\n"
+            "sudo pacman -S vlc\n"
+            "pip install python-vlc\n\n"
+            "After installation, please restart the application."
+        )
+        # Using a simple Tk window to show the error as the main app might not be fully initialized.
+        error_root = tk.Tk()
+        error_root.withdraw() # Hide the main window
+        messagebox.showerror(error_title, error_message)
+        error_root.destroy()
+        sys.exit(1) # Exit the application
+
+    # We need to initialize Tk to show the messagebox, then exit.
+    # This ensures the user sees the message even if the main app can't start.
+    if __name__ == '__main__':
+        show_vlc_error()
 from tkinter import font # Import font module
 from concurrent.futures import ThreadPoolExecutor
 
@@ -218,12 +252,17 @@ def download_clip(clip_url, folder, log_func=None):
 
 class VLCPlayer:
     def __init__(self): # No longer needs parent for UI creation here
+        if vlc is None:
+            self.instance = None
+            self.player = None
+            return
         self.instance = vlc.Instance()
         self.player = self.instance.media_player_new()
         self.videopanel = None # Will be created in setup_ui_in_frame
         self.control = None    # Will be created in setup_ui_in_frame
 
     def setup_ui_in_frame(self, parent_frame):
+        if vlc is None: return
         # parent_frame is the dedicated container for VLC UI, child of PanedWindow
 
         # Video panel is a child of parent_frame
@@ -270,7 +309,7 @@ class App:
         self.thumb_imgs = []
         self.access_token = None
         self.current_preset = None
-        self.vlc = VLCPlayer() # Initialize without parent for UI
+        self.vlc = VLCPlayer() if vlc else None # Initialize only if VLC is available
 
         # Attempt to set a default font
         try:
@@ -407,10 +446,16 @@ class App:
         clips_vlc_paned_window.add(self.clip_list_display_frame, weight=1)
 
         # VLC Player Area (Pane 2 of clips_vlc_paned_window)
-        vlc_pane_container = ttk.Frame(clips_vlc_paned_window, width=640, height=400) # Removed style='DebugVLC.TFrame'
-        # It will inherit the TFrame style which is already dark_bg
-        clips_vlc_paned_window.add(vlc_pane_container, weight=1)
-        self.vlc.setup_ui_in_frame(vlc_pane_container)
+        if self.vlc:
+            vlc_pane_container = ttk.Frame(clips_vlc_paned_window, width=640, height=400) # Removed style='DebugVLC.TFrame'
+            # It will inherit the TFrame style which is already dark_bg
+            clips_vlc_paned_window.add(vlc_pane_container, weight=1)
+            self.vlc.setup_ui_in_frame(vlc_pane_container)
+        else:
+            # If no VLC, add a placeholder frame with a message
+            no_vlc_frame = ttk.Frame(clips_vlc_paned_window, width=640, height=400)
+            ttk.Label(no_vlc_frame, text="VLC not found. Video preview is disabled.", style='TLabel').pack(pady=20, padx=10)
+            clips_vlc_paned_window.add(no_vlc_frame, weight=1)
 
         # Log-Textfeld unten - now in row 1, under the master_paned_window
         self.log_text = tk.Text(self.root, height=8, bg=widget_bg, fg=light_fg, relief=tk.FLAT, selectbackground=entry_select_bg)
@@ -569,13 +614,19 @@ class App:
 
             title_with_date = f"{clip['title']} ({clip['broadcaster_name']}) [{clip['view_count']} Aufrufe] - {formatted_date}"
             ttk.Label(frame, text=title_with_date, wraplength=350).pack(side='left', padx=5)
-            ttk.Button(frame, text="Vorschau", command=lambda u=clip['url']: self.play_clip(u)).pack(side='right')
+            preview_btn = ttk.Button(frame, text="Vorschau", command=lambda u=clip['url']: self.play_clip(u))
+            if not self.vlc:
+                preview_btn.config(state='disabled')
+            preview_btn.pack(side='right')
             frame.pack(fill='x', pady=3, padx=2)
             self.clip_vars.append((var, clip['url']))
 
         self.log(f"{len(self.clips)} Clips angezeigt.")
 
     def play_clip(self, url):
+        if not self.vlc:
+            self.log("VLC player not available.")
+            return
         self.log(f"Hole direkten Videostream für {url}...")
         stream_url = get_direct_video_url(url)
         if stream_url:
